@@ -11,6 +11,16 @@
 //! The menu model is plain, toolkit-independent data ([`MenuModel`], [`MenuEntry`]) — no UI
 //! crate is involved, so any application can drive it from its own menu tree.
 //!
+
+//! The public surface is deliberately **backend-neutral**: portable, toolkit-independent data
+//! (`MenuModel`/`MenuEntry`/`MenuCommand`, [`flat::FlatItem`] with
+//! [`MenuModel::from_flat`], `Shortcut`), one backend handle ([`AppMenu`]) and the click
+//! events — with platform backends slotting in behind that seam, and no portable code able
+//! to reach a backend's internals. Today: the Linux AppMenu/dbusmenu backend (this crate's
+//! live side) and the no-op stub everywhere else; a future macOS backend over AppKit/`muda`
+//! implements the same handle (see the README's *Backends* section) without touching the
+//! model or any caller.
+//!
 //! ```no_run
 //! use craft_appmenu::{MenuEntry, MenuEvent, MenuModel, AppMenu};
 //!
@@ -85,7 +95,7 @@ pub use model::{MenuCommand, MenuEntry, MenuModel, Shortcut, ShortcutMod};
 #[derive(Clone, Debug)]
 pub enum MenuEvent {
     /// A menu item was activated (`label` is the item's label, `action` its action token,
-    /// `id` the dbusmenu item id).
+    /// `id` the backend's item id — the dbusmenu item id on the Linux backend).
     Activated {
         label: String,
         action: String,

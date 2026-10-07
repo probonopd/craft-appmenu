@@ -15,6 +15,31 @@ unchanged. Never panics: every entry point returns a `Result` or a no-op handle;
 input from the bus is rejected; the worker thread retires itself on unrecoverable D-Bus
 errors instead of crashing the app.
 
+## Backends: the portable boundary
+
+The public surface is deliberately **backend-neutral**, so the same shell code runs
+everywhere and a new platform backend slots in without touching the model or any caller:
+
+- *Portable, compiled on every target:* `MenuModel` / `MenuEntry` / `MenuCommand`,
+  `flat::FlatItem` (+ `MenuModel::from_flat`), `Shortcut`/`ShortcutMod`, `MenuEvent`
+  (an activation carries the app's `action` token and the backend's item id), and the
+  `AppMenu` handle contract (`start` / `replace` / `try_event` / `hosted` / `shutdown`).
+- *Backend-specific, compiled only where it applies:* the Linux backend's `dbus.rs`
+  (`com.canonical.dbusmenu` at `/MenuBar`), `x11.rs` (window discovery) and
+  `registrar.rs` — none of them reachable from portable code.
+- *Today's backends:* **Linux/BSD** — AppMenu/dbusmenu (this crate's live side);
+  **everywhere else** — the no-op stub (the in-window menu bar owns the menus). A
+  **macOS** backend over AppKit/`muda` is a planned follow-up: the sibling apps' existing
+  `native_menu.rs` adapters (LightCraft's is the most complete — live labels, checked
+  items, dynamic rebuilds, accelerators that yield to focused text fields) are the
+  behavioural reference, and `Shortcut` ("Cmd" naming) and `MenuEntry` were shaped to
+  map onto muda items and accelerators.
+
+`AppMenu::hosted` is part of the portable contract on purpose: its *question* ("should
+this app hide its in-window menu bar right now?") is portable — its *answer* is
+backend-defined (Linux: a D-Bus menu registrar holds one of our windows; macOS: always
+true, the platform bar owns the menus; stub: always false).
+
 ## How it works
 
 1. **Model** (`model.rs`): toolkit-independent menu data — `MenuModel::top(children)`,

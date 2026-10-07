@@ -31,7 +31,8 @@ impl AppMenu {
         None
     }
 
-    /// No registrar can serve the menus on this platform, so the in-window menu bar stays.
+    /// Always false: no menu host exists on this platform, so the app keeps its in-window
+    /// menu bar.
     pub fn hosted(&self) -> bool {
         false
     }

@@ -60,8 +60,9 @@ impl AppMenu {
         })
     }
 
-    /// The unique bus name the menu is served on, once the connection is up (mostly for
-    /// diagnostics and tests; importers find us through the registrar, not by name).
+    /// The unique bus name the menu is served on, once the connection is up. A
+    /// Linux-backend detail (D-Bus connection address of the export), mostly for
+    /// diagnostics and tests; importers find us through the registrar, not by name.
     pub fn bus_name(&self) -> Option<String> {
         self.bus
             .lock()
@@ -85,10 +86,13 @@ impl AppMenu {
         Some(MenuEvent::Activated { label, action, id })
     }
 
-    /// Whether a registrar is currently holding a registration for one of this app's windows.
-    /// While it is, a global menu host is serving the menus in the shells bar and the app can
-    /// drop its in-window menu bar; the flag follows registrations every scan, so it flips
-    /// back at the same second a host (or its service) disappears.
+    /// Whether a menu host is currently serving the menus on this app's behalf, i.e. the app
+    /// should hide its in-window menu bar (letting the host's bar own the menus). What a host
+    /// is depends on the backend — here, the Linux one, a D-Bus menu registrar holding a
+    /// registration for one of the app's windows; a future macOS backend (the platform menu
+    /// bar) would always answer true, the no-op stub always false. Portable contract, so the
+    /// shell calls it on every platform the same way; the flag follows the registrations every
+    /// scan, so it flips back at the same second a host (or its service) disappears.
     pub fn hosted(&self) -> bool {
         self.hosted.load(Ordering::Relaxed)
     }
