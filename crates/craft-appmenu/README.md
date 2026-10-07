@@ -68,6 +68,9 @@ true, the platform bar owns the menus; stub: always false).
    `com.canonical.AppMenu.Registrar` (falling back to the Ayatana
    `org.ayatana.AppMenu.Registrar`); the first of the two that answers wins and stays sticky.
    Importers find windows through the registrar, so no owned bus name is needed for it.
+   Every outbound call is bounded by a 2 s connection method timeout, so a registrar that
+   is alive on the bus but wedged costs seconds, never zbus's 25 s default (per call, and
+   the scan calls it once per window).
 6. **Live exporter** (`live.rs`): one background thread owns one session-bus connection,
    coalesces bursts of models into a single publish, and re-scans/re-registers windows once a
    second (a registrar can appear or disappear at runtime; windows come and go too; a
@@ -129,7 +132,10 @@ while let Some(event) = menu.try_event() {
 
 Unit tests cover the flat→tree builder, the layout building/diff and the wire shapes
 (including a byte-level `GetLayout` reply round trip that decodes nested rows exactly as
-importers do), plus fake-based tests for the registrar sync (register-once, a registrar that
-forgets, windows that close, absent registrar, failed registration). An integration test
-exchanges `GetLayout`, `GetProperty` and `Event` clicks against the real session bus
-(skipping gracefully when no bus exists, so CI stays green without one).
+importers do). Fake-based tests cover the registrar sync (register-once, a registrar that
+forgets, windows that close, absent registrar, failed registration). Against a real session
+bus: an integration test exchanges `GetLayout`, `GetProperty` and `Event` clicks, and two
+regression tests pin the bounded registrar calls — a registrar fixture whose
+`GetMenuForWindow` never replies must surface as `Err` at the connection's deadline (not
+zbus's 25 s default), and the worker's connection must carry that deadline (all skipping
+gracefully when no bus exists, so CI stays green without one).

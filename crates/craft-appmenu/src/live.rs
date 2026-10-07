@@ -20,6 +20,14 @@ use zvariant::OwnedValue;
 /// `QueryTree` round trip and, while no registrar exists, one failing D-Bus call.
 const SCAN_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Bounds every outbound call the worker's connection makes — the registrar's
+/// `GetMenuForWindow` / `RegisterWindow` / `UnregisterWindow` and the internal bus calls —
+/// so a registrar that is alive on the bus but wedged (answering nothing) cannot stall the
+/// scan for zbus's 25 s default, sequentially per window, while publishes queue and
+/// activations and `hosted()` go stale. A deadline miss surfaces as `Err`, which the scan
+/// already handles (retry the registration / forget the sticky service choice).
+const REGISTRAR_CALL_TIMEOUT: Duration = Duration::from_secs(2);
+
 enum Message {
     Model(MenuModel),
     Shutdown,
@@ -174,7 +182,10 @@ fn connection(
         state: state.clone(),
     };
     let conn = zbus::blocking::connection::Builder::session()
-        .and_then(|b| b.serve_at(MENU_OBJECT_PATH, iface))
+        .and_then(|b| {
+            b.method_timeout(REGISTRAR_CALL_TIMEOUT)
+                .serve_at(MENU_OBJECT_PATH, iface)
+        })
         .and_then(|b| b.build())
         .map_err(|e| Error::Platform(format!("D-Bus session: {e}")))?;
     let mut slot = bus.lock().unwrap_or_else(PoisonError::into_inner);
@@ -485,5 +496,22 @@ mod tests {
         sync(&[0x66], &mut registrar, &mut registered);
         assert_eq!(registrar.registers, 3);
         assert_eq!(registered.len(), 1);
+    }
+
+    /// The worker's own connection must carry the bounded method timeout: that constant is
+    /// what makes a wedged registrar cost seconds instead of zbus's 25 s default per call
+    /// (see Registrar's wedged test for the wait itself).
+    #[test]
+    fn the_worker_connection_bounds_its_calls() {
+        let state = Arc::new(Mutex::new(MenuState::default()));
+        let bus = Arc::new(Mutex::new(None));
+        let conn = match connection(&state, &bus) {
+            Ok(conn) => conn,
+            Err(e) => {
+                eprintln!("skipping (no usable session bus): {e}");
+                return;
+            }
+        };
+        assert_eq!(conn.method_timeout(), Some(REGISTRAR_CALL_TIMEOUT));
     }
 }
