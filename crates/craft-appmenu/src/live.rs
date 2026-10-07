@@ -7,7 +7,7 @@ use crate::dbus::{MENU_OBJECT_PATH, MenuBarIface, MenuState, wire_props};
 use crate::layout::{FlatMenu, ROOT_ID, diff};
 use crate::registrar::Registrar;
 use crate::x11;
-use crate::{Error, MenuEvent, MenuModel};
+use crate::{Error, MenuEvent, MenuModel, MenuWake};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -46,9 +46,17 @@ pub struct AppMenu {
 
 impl AppMenu {
     /// Starts the exporter on a background thread. Fails when the session bus is
-    /// unavailable (the app then uses only its in-window menu bar).
-    pub fn start(app_name: &str) -> Result<AppMenu, Error> {
+    /// unavailable (the app then uses only its in-window menu bar). `wake` is called on
+    /// the exporter's threads whenever a click is recorded or the hosted flag flips, so a
+    /// reactive app renders the frame in which `try_event`/`hosted` are read at once
+    /// instead of at its next input event.
+    pub fn start(app_name: &str, wake: MenuWake) -> Result<AppMenu, Error> {
         let state = Arc::new(Mutex::new(MenuState::default()));
+        {
+            // The D-Bus interface threads read it from the shared state when a click lands.
+            let mut locked = state.lock().unwrap_or_else(PoisonError::into_inner);
+            locked.wake = Some(wake.clone());
+        }
         let bus = Arc::new(Mutex::new(None));
         let hosted = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
@@ -58,7 +66,7 @@ impl AppMenu {
         let name = app_name.to_string();
         std::thread::Builder::new()
             .name("craft-appmenu".into())
-            .spawn(move || worker(&name, rx, worker_state, worker_bus, worker_hosted))
+            .spawn(move || worker(&name, rx, worker_state, worker_bus, worker_hosted, wake))
             .map_err(|e| Error::Platform(format!("cannot start the appmenu thread: {e}")))?;
         Ok(AppMenu {
             tx,
@@ -87,10 +95,7 @@ impl AppMenu {
     /// Takes the oldest pending menu click, if any (the UI calls this from its update loop).
     pub fn try_event(&self) -> Option<MenuEvent> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if state.activations.is_empty() {
-            return None;
-        }
-        let (id, label, action) = state.activations.remove(0);
+        let (id, label, action) = state.activations.pop_front()?;
         Some(MenuEvent::Activated { label, action, id })
     }
 
@@ -124,6 +129,7 @@ fn worker(
     state: Arc<Mutex<MenuState>>,
     bus: Arc<Mutex<Option<String>>>,
     hosted: Arc<AtomicBool>,
+    wake: MenuWake,
 ) {
     log::debug!("AppMenu: worker starting ({app_name})");
     let Ok(conn) = connection(&state, &bus) else {
@@ -163,7 +169,12 @@ fn worker(
             registrar: &mut registrar,
         };
         sync_registrations(&mut windows, &mut view, &mut registered);
-        hosted.store(!registered.is_empty(), Ordering::Relaxed);
+        let now = !registered.is_empty();
+        if hosted.swap(now, Ordering::Relaxed) != now {
+            // The hosted flag drives the shell's title-bar decision: wake the app, or a
+            // host appearing/vanishing is only rendered at the next input event.
+            wake();
+        }
     }
     hosted.store(false, Ordering::Relaxed);
     for &window in registered.keys() {
@@ -200,9 +211,11 @@ fn connection(
 
 /// Rebuilds the flat menu, diffs it against the exported one and emits only what changed.
 fn publish(state: &Arc<Mutex<MenuState>>, conn: &Connection, model: &MenuModel) {
-    let menu = FlatMenu::build(model);
     let (structure, updated, revision) = {
         let mut locked = state.lock().unwrap_or_else(PoisonError::into_inner);
+        // Ids stay stable across publishes (a click racing this rebuild still resolves the
+        // item it was made on); a fresh numbering would reassign every item's id.
+        let menu = FlatMenu::build_with_ids(model, &mut locked.ids);
         let structure = locked
             .menu
             .as_ref()

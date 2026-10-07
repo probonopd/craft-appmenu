@@ -2,7 +2,7 @@
 //! updates only push what changed. Pure data: no D-Bus types, unit-testable on any target.
 
 use crate::model::{MenuCommand, MenuEntry, MenuModel, Shortcut, ShortcutMod};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Root item id; the dbusmenu spec fixes it and importers always start here.
 pub const ROOT_ID: u32 = 0;
@@ -48,16 +48,70 @@ pub struct MenuDiff {
     pub updated: Vec<(u32, Props)>,
 }
 
+/// The stable-id allocator: keeps dbusmenu item ids meaningful across rebuilds, so a
+/// click that races a `LayoutUpdated` still resolves the item it was made on. Items are
+/// keyed by identity — leaf items by their `action` token (the stable thing in dynamic
+/// menus: "Undo Exposure" keeps its id while its label changes), submenu titles by their
+/// label (they have no action), separators by position in identity, duplicates by
+/// occurrence order. The map is bounded: past the cap it resets (ids renumber once; the
+/// shape change makes importers re-fetch, which they would do anyway).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ids {
+    by_key: HashMap<String, u32>,
+    next: u32,
+}
+
+/// Beyond this many distinct item identities the allocator starts over (hostile-input
+/// bound; a Photoshop-scale catalog has a few hundred items).
+const MAX_IDS: u32 = 65_536;
+
+impl Default for Ids {
+    fn default() -> Self {
+        // 0 is the root's reserved id (the dbusmenu spec fixes it); ids hand out from 1.
+        Ids {
+            by_key: HashMap::new(),
+            next: 1,
+        }
+    }
+}
+
+impl Ids {
+    /// Allocates or looks up the id for an item identity.
+    fn alloc(&mut self, key: String) -> u32 {
+        if let Some(&id) = self.by_key.get(&key) {
+            return id;
+        }
+        if self.next >= MAX_IDS {
+            log::warn!("AppMenu: id table capped; item ids renumber");
+            self.by_key.clear();
+            self.next = 1;
+        }
+        let id = self.next;
+        self.next = id.saturating_add(1);
+        self.by_key.insert(key, id);
+        id
+    }
+}
+
 impl FlatMenu {
     /// Maximum submenu nesting accepted when flattening (documents and models are hostile
     /// inputs by the never-crash rule; Photoshop-scale menus never approach this).
     const MAX_DEPTH: u32 = 32;
 
     /// Flattens a model into ids in depth-first reading order (root = 0), so ids follow
-    /// menu order and numbering stays predictable. Ids are assigned afresh on every build;
-    /// when ids move, the shape changes, so importers re-fetch and properties of
-    /// still-stable ids are diffed by id.
+    /// menu order and numbering stays predictable: items number 1, 2, 3, … depth-first.
+    /// Only for one-off builds (tests); the exporter builds with a persistent allocator
+    /// via [`FlatMenu::build_with_ids`], so ids survive across publishes.
+    #[cfg(test)]
     pub fn build(model: &MenuModel) -> FlatMenu {
+        FlatMenu::build_with_ids(model, &mut Ids::default())
+    }
+
+    /// Like [`FlatMenu::build`], but ids stay stable across calls that share `ids`: an item
+    /// keeps the id it was first exported with, so clicks that race a structural rebuild
+    /// cannot run the wrong command, importers re-fetch less, and property-only updates
+    /// continue to cover the common case.
+    pub fn build_with_ids(model: &MenuModel, ids: &mut Ids) -> FlatMenu {
         let mut menu = FlatMenu::default();
         menu.items.push(FlatItem {
             id: ROOT_ID,
@@ -70,8 +124,16 @@ impl FlatMenu {
                 ..Props::default()
             },
         });
-        let mut next_id = 1u32;
-        walk_preorder(&mut menu, ROOT_ID, &model.children, 0, &mut next_id);
+        let mut occurrence = HashMap::new();
+        walk_preorder(
+            &mut menu,
+            ROOT_ID,
+            &model.children,
+            0,
+            ids,
+            "",
+            &mut occurrence,
+        );
         menu.actions = menu
             .items
             .iter()
@@ -110,7 +172,9 @@ fn walk_preorder(
     parent: u32,
     entries: &[MenuEntry],
     depth: u32,
-    next_id: &mut u32,
+    ids: &mut Ids,
+    parent_key: &str,
+    occurrence: &mut HashMap<String, u32>,
 ) {
     if depth > FlatMenu::MAX_DEPTH || menu.items.len() >= MAX_ITEMS {
         log::warn!(
@@ -121,11 +185,37 @@ fn walk_preorder(
         return;
     }
     for (pos, entry) in entries.iter().enumerate() {
-        let Some(next) = next_id.checked_add(1) else {
-            return;
+        let (kind, data) = match entry {
+            MenuEntry::Command(c) => {
+                if c.children.as_ref().is_none_or(|n| n.is_empty()) {
+                    // A leaf keeps its id across label changes (dynamic labels like "Undo
+                    // Exposure" only rename the item): the action token identifies it.
+                    ("a".to_string(), c.action.clone())
+                } else {
+                    // A title has no action of its own; its label identifies it (a rename
+                    // regenerates ids of its subtree — a structural change the host
+                    // re-fetches anyway).
+                    ("m".to_string(), c.label.clone())
+                }
+            }
+            // Separators carry no identity beyond their slot: repeats in one menu are
+            // distinct items, in order of appearance.
+            MenuEntry::Separator => ("sep".to_string(), format!("{pos}")),
         };
-        let id = *next_id;
-        *next_id = next;
+        let base = format!("{parent_key}\u{1}{kind}\u{1}{data}");
+        let occ = match occurrence.get_mut(&base) {
+            Some(n) => {
+                let o = *n;
+                *n += 1;
+                o
+            }
+            None => {
+                occurrence.insert(base.clone(), 0);
+                0
+            }
+        };
+        let key = format!("{base}\u{1}{occ}");
+        let id = ids.alloc(key.clone());
         match entry {
             MenuEntry::Separator => {
                 menu.items.push(FlatItem {
@@ -155,7 +245,7 @@ fn walk_preorder(
                     props: Props::command(c, has_children),
                 });
                 if let Some(kids) = c.children.as_ref().filter(|kids| !kids.is_empty()) {
-                    walk_preorder(menu, id, kids, depth + 1, next_id);
+                    walk_preorder(menu, id, kids, depth + 1, ids, &key, occurrence);
                 }
             }
         }
@@ -368,6 +458,90 @@ mod tests {
                 true,
             )]),
         ])
+    }
+
+    #[test]
+    fn ids_survive_structural_changes() {
+        // The race the stable ids close: a click carries an id that was assigned against
+        // an earlier revision. If ids were renumbered per build, the id would resolve to
+        // whatever item now sits in its slot.
+        let mut ids = Ids::default();
+        let first = FlatMenu::build_with_ids(&demo_model(), &mut ids);
+        let save = first
+            .items
+            .iter()
+            .find(|i| i.action == "file.save")
+            .map(|i| i.id)
+            .expect("a Save item");
+        let about = first
+            .items
+            .iter()
+            .find(|i| i.action == "help.about")
+            .map(|i| i.id)
+            .expect("an About item");
+
+        // The model changes structurally: the whole File menu (and its separator) goes
+        // away and Help grows a second command *after* About, which under per-build
+        // numbering would take About's id.
+        let changed = MenuModel::top(vec![MenuEntry::command("Help", "", false).submenu(vec![
+            MenuEntry::command("About CraftApp", "help.about", true),
+            MenuEntry::command("Handbook", "help.handbook", true),
+        ])]);
+        let second = FlatMenu::build_with_ids(&changed, &mut ids);
+        let about2 = second
+            .items
+            .iter()
+            .find(|i| i.action == "help.about")
+            .map(|i| i.id)
+            .expect("About still exported");
+        let handbook = second
+            .items
+            .iter()
+            .find(|i| i.action == "help.handbook")
+            .map(|i| i.id)
+            .expect("Handbook exported");
+        assert_eq!(about2, about, "surviving items keep their id");
+        assert_ne!(handbook, about, "the new item does not reuse a live id");
+
+        // And a removed menu's id is not silently handed to an unrelated item.
+        assert_ne!(handbook, save, "removed items' ids are not reused");
+
+        // Re-publishing the original model restores the original ids (the identities are
+        // still in the allocator).
+        let back = FlatMenu::build_with_ids(&demo_model(), &mut ids);
+        assert_eq!(
+            back.items
+                .iter()
+                .find(|i| i.action == "file.save")
+                .map(|i| i.id),
+            Some(save)
+        );
+    }
+
+    #[test]
+    fn ids_renumber_when_the_table_is_capped() {
+        // Hostile-input bound: past MAX_IDS the allocator starts over instead of growing
+        // without limit (and never hands out the root's reserved 0).
+        let mut ids = Ids::default();
+        let key = "a:one".to_string();
+        let one = ids.alloc(key.clone());
+        for i in 0..=super::MAX_IDS {
+            ids.alloc(format!("x:{i}"));
+        }
+        let one2 = ids.alloc(key);
+        assert_ne!(one2, one, "the table reset");
+        assert_ne!(one2, super::ROOT_ID, "0 stays reserved");
+        assert_eq!(one, 1, "ids hand out from 1");
+    }
+
+    #[test]
+    fn ids_never_collide_with_the_root() {
+        let m = FlatMenu::build(&demo_model());
+        assert_eq!(m.item(ROOT_ID).map(|i| i.id), Some(ROOT_ID), "root stays 0");
+        assert!(
+            m.items.iter().skip(1).all(|i| i.id != ROOT_ID),
+            "no other item ever gets the root's id"
+        );
     }
 
     #[test]

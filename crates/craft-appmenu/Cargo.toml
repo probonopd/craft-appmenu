@@ -27,11 +27,9 @@ x11rb = { version = "=0.13.2", default-features = false }
 log = "0.4"
 thiserror = "2"
 
-# The never-crash standard (no unwrap/expect/panic/… outside tests).
-[lints.clippy]
-unwrap_used = "deny"
-expect_used = "deny"
-panic = "deny"
-unimplemented = "deny"
-todo = "deny"
-unreachable = "deny"
+# The workspace lints give the never-crash standard: `[lints] workspace = true` keeps the
+# rust lints (`unsafe_code = "forbid"`) and adds nothing else — the deny list lives in the
+# `#![deny(...)]` attribute in `lib.rs`. A crate-local `[lints.clippy]` would *replace* the
+# workspace's lint set instead of extending it, which is how `unsafe_code` was lost.
+[lints]
+workspace = true

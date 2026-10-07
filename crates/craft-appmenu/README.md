@@ -105,7 +105,8 @@ let model = MenuModel::from_flat(&[
     FlatItem::command("Save", &["File"], "file.save", true),
 ]);
 
-let menu = craft_appmenu::AppMenu::start("my-app")?;
+let wake = std::sync::Arc::new(|| {}); // egui: `move || ctx.request_repaint()`
+let menu = craft_appmenu::AppMenu::start("my-app", wake)?;
 menu.replace(&model);
 // in the frame loop:
 while let Some(event) = menu.try_event() {
@@ -118,7 +119,7 @@ while let Some(event) = menu.try_event() {
 * Take `craft-appmenu` as a dependency from its repository, pinned exactly (a tag or commit;
   review the diff before bumping — the crate pins its own D-Bus/X11 deps exactly the same
   way).
-* Call `AppMenu::start(app_name)` once (lazily, on the first frame is fine), publish on a
+* Call `AppMenu::start(app_name, wake)` once (lazily, on the first frame; `wake` must wake the UI — egui's `ctx.request_repaint()` — because clicks land on the exporter's threads), publish on a
   duty cycle or on a dirty flag, drain `try_event` every frame, and mirror `hosted()` into
   the shell.
 * Map activations to the same dispatch path an in-window menu click uses, so behaviour is

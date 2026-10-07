@@ -28,7 +28,8 @@
 //!     .submenu(vec![MenuEntry::command("New…", "file.new", true)])]);
 //! // Linux/BSD with D-Bus: export and register our X11 top-level windows.
 //! // Other platforms: Ok with a no-op handle (activation events never fire).
-//! let menu = AppMenu::start("my-app").ok();
+//! let wake = std::sync::Arc::new(|| {}); // egui: `ctx.request_repaint()`
+//! let menu = AppMenu::start("my-app", wake).ok();
 //! if let Some(menu) = &menu {
 //!     menu.replace(&model);
 //!     while let Some(ev) = menu.try_event() {
@@ -87,6 +88,13 @@ pub enum Error {
     #[error("{0}")]
     Platform(String),
 }
+
+/// The shell-side waker handed to [`AppMenu::start`]. Clicks land and the hosted flag
+/// flips on the exporter's own threads, and a reactive app renders no frames while idle:
+/// without the waker a global-menu click would only show at the app's next real input
+/// event. The waker makes the next frame happen (egui's `Context::request_repaint` is the
+/// natural choice), so `try_event`/`hosted` are read at once.
+pub type MenuWake = std::sync::Arc<dyn Fn() + Send + Sync>;
 
 pub use flat::FlatItem;
 pub use model::{MenuCommand, MenuEntry, MenuModel, Shortcut, ShortcutMod};

@@ -2,8 +2,9 @@
 //! layout. One interface name is served; every importer we target (libdbusmenu,
 //! libdbusmenu-qt, Waybar, Gershwin Menu) queries `com.canonical.dbusmenu`.
 
-use crate::layout::{FlatMenu, Props, ROOT_ID};
-use std::collections::HashMap;
+use crate::MenuWake;
+use crate::layout::{FlatMenu, Ids, Props, ROOT_ID};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use zvariant::{OwnedValue, Value};
 
@@ -14,13 +15,25 @@ pub const MENU_OBJECT_PATH: &str = "/MenuBar";
 // The dbusmenu interface version we implement is the one every importer understands.
 const VERSION: u32 = 3;
 
+/// How many pending clicks the queue holds at most. Any session-bus peer can send
+/// `Event("clicked")` — local peers are trusted no more than a malformed file — so the
+/// queue is bounded: overflow drops the oldest clicks (stale clicks are the worthless
+/// ones; the newest stay queued for the UI's next `try_event` batch).
+const MAX_ACTIVATIONS: usize = 64;
+
 /// Shared server state: the exported layout plus recorded activations.
 #[derive(Default)]
 pub struct MenuState {
     /// `None` until the first model is published.
     pub menu: Option<FlatMenu>,
     pub revision: u32,
-    pub activations: Vec<(u32, String, String)>,
+    /// The stable-id allocator: item ids stay meaningful across rebuilds (a click racing
+    /// a `LayoutUpdated` resolves the item it was made on; see [`crate::layout::Ids`]).
+    pub ids: Ids,
+    pub activations: VecDeque<(u32, String, String)>,
+    /// The shell-side waker (see [`crate::MenuWake`]); called when a click is recorded,
+    /// so a reactive app renders the frame that reads `try_event`.
+    pub wake: Option<MenuWake>,
 }
 
 impl MenuState {
@@ -34,7 +47,15 @@ impl MenuState {
             return;
         }
         let label = item.props.label.clone().unwrap_or_default();
-        self.activations.push((id, label, item.action.clone()));
+        self.activations.push_back((id, label, item.action.clone()));
+        while self.activations.len() > MAX_ACTIVATIONS {
+            self.activations.pop_front();
+        }
+        // The D-Bus event arrived on the exporter's own thread: without the waker the app
+        // (which renders no frames while idle) would only see the click at its next event.
+        if let Some(wake) = &self.wake {
+            wake();
+        }
     }
 }
 
@@ -312,7 +333,69 @@ impl MenuBarIface {
 mod tests {
     use super::*;
     use crate::model::{MenuEntry, MenuModel};
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use zvariant::signature;
+
+    #[test]
+    fn activations_are_capped_and_wake_the_shell() {
+        let mut state = MenuState::default();
+        let hits = Arc::new(AtomicUsize::new(0));
+        {
+            let hits = hits.clone();
+            state.wake = Some(Arc::new(move || {
+                hits.fetch_add(1, AtomicOrdering::Relaxed);
+            }));
+        }
+        state.menu = Some(demo());
+        let go = state
+            .menu
+            .as_ref()
+            .and_then(|m| m.actions.iter().find(|(_, a)| **a == "file.new"))
+            .map(|(id, _)| *id)
+            .expect("a New item");
+        for _ in 0..MAX_ACTIVATIONS + 5 {
+            state.activate(go);
+        }
+        assert_eq!(
+            state.activations.len(),
+            MAX_ACTIVATIONS,
+            "the queue is capped"
+        );
+        // Overflow drops the oldest: the queued clicks are exactly the newest batch.
+        assert_eq!(
+            state.activations.back().map(|(id, _, _)| (id, go)),
+            Some((&go, go))
+        );
+        assert_eq!(
+            hits.load(AtomicOrdering::Relaxed),
+            MAX_ACTIVATIONS + 5,
+            "every recorded click wakes the shell"
+        );
+    }
+
+    #[test]
+    fn dead_and_disabled_clicks_never_wake_the_shell() {
+        let mut state = MenuState::default();
+        let hits = Arc::new(AtomicUsize::new(0));
+        {
+            let hits = hits.clone();
+            state.wake = Some(Arc::new(move || {
+                hits.fetch_add(1, AtomicOrdering::Relaxed);
+            }));
+        }
+        state.menu = Some(demo());
+        state.activate(999_999); // no such item
+        // The File title: a submenu, not a command.
+        let file = state
+            .menu
+            .as_ref()
+            .and_then(|m| m.item(1))
+            .expect("File exists");
+        assert_eq!(file.action, "", "the File item is a title");
+        state.activate(1);
+        assert!(state.activations.is_empty(), "no click was recorded");
+        assert_eq!(hits.load(AtomicOrdering::Relaxed), 0, "and nothing woke");
+    }
 
     fn demo() -> FlatMenu {
         FlatMenu::build(&MenuModel::top(vec![

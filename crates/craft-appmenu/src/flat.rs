@@ -82,9 +82,10 @@ impl FlatItem {
 
 /// The tree-building rules, one nesting level at a time: leaves sit at `path.len() ==
 /// depth`, a submenu appears at the position of its first child, `"---"` means a separator
-/// (never doubled, never leading or trailing), and submenu titles are enabled when any
-/// child is enabled (or it has children at all). Identical input yields an identical tree
-/// to what an in-window bar implementing the same rules renders.
+/// (never doubled, never leading or trailing), and submenu titles are always enabled
+/// (opening a menu is never a disabled action; enablement is per item, like in the
+/// in-window menu bar). Identical input yields an identical tree to what an in-window bar
+/// implementing the same rules renders.
 impl MenuModel {
     /// Builds the model: top-level menus keep first-seen order (a catalog lists its menus
     /// contiguously, so this restores the catalog's order); a top menu with no items is

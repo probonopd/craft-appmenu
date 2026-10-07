@@ -2,7 +2,7 @@
 //! the application menu already shows in-window there, so there is nothing to export.
 //! The API is identical to the live exporter, so callers compile unchanged.
 
-use crate::{Error, MenuEvent, MenuModel};
+use crate::{Error, MenuEvent, MenuModel, MenuWake};
 
 /// A handle whose event queue is always empty.
 pub struct AppMenu {
@@ -10,8 +10,9 @@ pub struct AppMenu {
 }
 
 impl AppMenu {
-    /// Always fails: there is no global-menu host on this platform.
-    pub fn start(app_name: &str) -> Result<AppMenu, Error> {
+    /// Always fails: there is no global-menu host on this platform. `wake` is accepted so
+    /// every target compiles to the same call (it is never called here).
+    pub fn start(app_name: &str, _wake: MenuWake) -> Result<AppMenu, Error> {
         Err(Error::Platform(format!(
             "{app_name}: no global menu (AppMenu/dbusmenu) on this platform; \
              the in-window menu bar is already visible"

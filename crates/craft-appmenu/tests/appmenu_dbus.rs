@@ -1,6 +1,11 @@
 //! A session-bus round trip: the exporter publishes a model, a client (this test's second
 //! connection) fetches `GetLayout`, reads properties and sends `Event` clicks.
 //! Skips gracefully when no session bus is available (never fails on a bare CI box).
+//!
+//! The whole file is the Linux backend's: zbus/zvariant/serde are target-gated dependencies,
+//! so without this gate `cargo test --workspace` / `clippy --all-targets` fail to compile the
+//! test crate on macOS, Windows and wasm (where the exporter itself is the no-op stub).
+#![cfg(all(unix, not(target_os = "macos"), not(target_arch = "wasm32")))]
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -60,7 +65,7 @@ fn row_child(child: &OwnedValue) -> (i32, HashMap<String, OwnedValue>, Vec<Owned
 #[test]
 fn client_sees_layout_and_clicks_come_back() {
     // No session bus (bare CI): skip instead of failing.
-    let menu = match AppMenu::start("craft-appmenu-test") {
+    let menu = match AppMenu::start("craft-appmenu-test", std::sync::Arc::new(|| {})) {
         Ok(menu) => menu,
         Err(e) => {
             eprintln!("skipping (no usable session bus): {e}");
