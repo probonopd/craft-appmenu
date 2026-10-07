@@ -91,9 +91,10 @@ fn window_list(conn: &RustConnection, window: u32, name: &[u8]) -> Option<Vec<u3
     Some(
         reply
             .value
-            .chunks_exact(4)
-            .filter_map(|b| b.try_into().ok())
-            .map(u32::from_le_bytes)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| u32::from_le_bytes(*b))
             .collect(),
     )
 }
@@ -184,8 +185,9 @@ fn property_atoms(conn: &RustConnection, window: u32, atom: u32) -> Vec<u32> {
     };
     reply
         .value
-        .chunks_exact(4)
-        .filter_map(|b| b.try_into().ok())
-        .map(u32::from_le_bytes)
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| u32::from_le_bytes(*b))
         .collect()
 }
